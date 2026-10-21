@@ -2,6 +2,7 @@
 
 #![cfg_attr(fuzzing, allow(dead_code))]
 #![cfg_attr(fuzzing, allow(unused_variables))]
+#![cfg_attr(fuzzing, allow(unused_imports))]
 
 #[allow(unused_imports)]
 use {
@@ -325,6 +326,9 @@ impl KeysSend {
             }
         }
 
+        // Decryption is skipped when fuzzing, so encryption is too: two
+        // fuzzed peers then understand each other after NEWKEYS.
+        #[cfg(not(fuzzing))]
         match &mut self.cipher {
             EncKey::ChaPoly(k) => k.encrypt(seq, enc, mac).trap()?,
             EncKey::Aes256Ctr(a) => {
