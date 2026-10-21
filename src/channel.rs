@@ -294,6 +294,23 @@ impl Channels {
         }
     }
 
+    /// Reports how a session's command ended (RFC 4254 6.10).
+    pub(crate) fn exit(
+        &self,
+        num: ChanNum,
+        req: Req<'_>,
+        s: &mut TrafSend,
+    ) -> Result<()> {
+        let ch = self.get(num)?;
+        if ch.sent_close {
+            return error::ChannelEOF.fail();
+        }
+        match ch.ty {
+            ChanType::Session => req.send(ch, s),
+            _ => error::BadChannelData.fail(),
+        }
+    }
+
     fn dispatch_open(
         &mut self,
         p: &ChannelOpen<'_>,
@@ -649,8 +666,8 @@ pub enum Req<'a> {
     WinChange(packets::WinChange),
     Break(packets::Break),
     // Signal,
-    // ExitStatus,
-    // ExitSignal,
+    ExitStatus(packets::ExitStatus),
+    ExitSignal(packets::ExitSignal<'a>),
 }
 
 impl Req<'_> {
@@ -678,6 +695,8 @@ impl Req<'_> {
             }),
             Req::WinChange(rt) => ChannelReqType::WinChange(rt),
             Req::Break(rt) => ChannelReqType::Break(rt),
+            Req::ExitStatus(rt) => ChannelReqType::ExitStatus(rt),
+            Req::ExitSignal(rt) => ChannelReqType::ExitSignal(rt),
         };
 
         let p = ChannelRequest {

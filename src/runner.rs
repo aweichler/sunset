@@ -8,7 +8,7 @@ use core::{hash::Hash, mem::discriminant, task::Waker};
 
 use crate::*;
 use channel::{ChanData, ChanNum};
-use channel::{CliSessionExit, CliSessionOpener};
+use channel::{CliSessionExit, CliSessionOpener, Req};
 use encrypt::KeyState;
 use event::{CliEvent, CliEventId, Event, ServEvent, ServEventId};
 use traffic::{TrafIn, TrafOut};
@@ -742,6 +742,49 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
             trace!("winch as server");
             Err(error::BadUsage.build())
         }
+    }
+
+    /// Report the exit status of a session's command (RFC 4254 6.10).
+    ///
+    /// Only call on a server session, before the channel is closed.
+    /// `Error::BusySend` means the output has no room yet; call again
+    /// after output has been written.
+    pub fn exit_status(&mut self, chan: &ChanHandle, status: u32) -> Result<()> {
+        self.exit(chan, Req::ExitStatus(packets::ExitStatus { status }))
+    }
+
+    /// Report that a session's command was ended by a signal (RFC 4254 6.10).
+    ///
+    /// `signal` is the name without the "SIG" prefix, such as "TERM".
+    /// Only call on a server session, before the channel is closed.
+    /// `Error::BusySend` means the output has no room yet; call again
+    /// after output has been written.
+    pub fn exit_signal(
+        &mut self,
+        chan: &ChanHandle,
+        signal: &str,
+        core_dumped: bool,
+        message: &str,
+    ) -> Result<()> {
+        self.exit(
+            chan,
+            Req::ExitSignal(packets::ExitSignal {
+                signal,
+                core: core_dumped,
+                error: message.into(),
+                lang: "",
+            }),
+        )
+    }
+
+    fn exit(&mut self, chan: &ChanHandle, req: Req<'_>) -> Result<()> {
+        if CS::is_client() {
+            return Err(error::BadUsage.build());
+        }
+        let mut s = self.traf_out.sender(&mut self.keys);
+        self.conn.channels.exit(chan.0, req, &mut s)?;
+        self.wake();
+        Ok(())
     }
 
     // Wake SSH TCP socket input and output as required.
