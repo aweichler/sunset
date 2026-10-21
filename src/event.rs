@@ -9,7 +9,7 @@ use core::fmt::Debug;
 
 use crate::*;
 use channel::{CliSessionExit, CliSessionOpener};
-use packets::Packet;
+use packets::{Packet, WinChange};
 use runner::{CliRunner, ServRunner};
 use sshwire::TextString;
 
@@ -300,6 +300,10 @@ pub enum ServEvent<'g, 'a> {
     /// Server has received one environment variable.
     /// Note: input strings are not sanitised.
     SessionEnv(ServEnvironmentRequest<'g, 'a>),
+    /// The client's terminal changed its size.
+    SessionWindowChange(ServWindowChange<'g, 'a>),
+    /// The client sends a signal to the session's command.
+    SessionSignal(ServSignal<'g, 'a>),
 
     /// The SSH session is no longer running
     Defunct,
@@ -326,6 +330,8 @@ impl Debug for ServEvent<'_, '_> {
             Self::SessionSubsystem(_) => "SessionSubsystem",
             Self::SessionPty(_) => "SessionPty",
             Self::SessionEnv(_) => "Environment",
+            Self::SessionWindowChange(_) => "SessionWindowChange",
+            Self::SessionSignal(_) => "SessionSignal",
             Self::Defunct => "Defunct",
             Self::PollAgain => "PollAgain",
         };
@@ -797,8 +803,6 @@ impl Drop for ServExecRequest<'_, '_> {
 }
 
 /// A PTY request
-///
-/// Placeholder, doesn't yet return the PTY information.
 pub struct ServPtyRequest<'g, 'a> {
     runner: &'g mut Runner<'a, Server>,
     num: ChanNum,
@@ -810,7 +814,20 @@ impl<'g, 'a> ServPtyRequest<'g, 'a> {
         Self { runner, num, done: false }
     }
 
-    // TODO return PTY information to the caller
+    /// The terminal type, the client's `TERM`.
+    pub fn term(&self) -> Result<&str> {
+        self.runner.fetch_pty_term()?.to_str()
+    }
+
+    /// The terminal's size, in characters and in pixels (0 if unknown).
+    pub fn size(&self) -> Result<WinChange> {
+        self.runner.fetch_winsize()
+    }
+
+    /// The encoded terminal modes (RFC 4254 8), unparsed.
+    pub fn modes(&self) -> Result<&[u8]> {
+        Ok(self.runner.fetch_pty_modes()?.0)
+    }
 
     /// Indicate that the request succeeded.
     ///
@@ -916,6 +933,107 @@ impl<'g, 'a> ServEnvironmentRequest<'g, 'a> {
     // TODO: does the app care about wantreply?
 }
 
+/// A window-change request: the client's terminal has a new size.
+pub struct ServWindowChange<'g, 'a> {
+    runner: &'g mut Runner<'a, Server>,
+    num: ChanNum,
+    done: bool,
+}
+
+impl<'g, 'a> ServWindowChange<'g, 'a> {
+    fn new(runner: &'g mut Runner<'a, Server>, num: ChanNum) -> Self {
+        Self { runner, num, done: false }
+    }
+
+    /// The terminal's new size, in characters and in pixels (0 if unknown).
+    pub fn size(&self) -> Result<WinChange> {
+        self.runner.fetch_winsize()
+    }
+
+    /// Indicate that the request succeeded.
+    ///
+    /// Clients do not ask for a reply to a window-change, so this
+    /// usually does nothing.
+    pub fn succeed(mut self) -> Result<()> {
+        self.done = true;
+        self.runner.resume_chanreq(true)
+    }
+
+    /// Indicate that the request failed.
+    ///
+    /// Does not need to be called explicitly, also occurs on drop.
+    pub fn fail(mut self) -> Result<()> {
+        self.done = true;
+        self.runner.resume_chanreq(false)
+    }
+
+    /// Return the associated channel number.
+    pub fn channel(&self) -> ChanNum {
+        self.num
+    }
+}
+
+impl Drop for ServWindowChange<'_, '_> {
+    fn drop(&mut self) {
+        if !self.done {
+            if let Err(e) = self.runner.resume_chanreq(false) {
+                trace!("Error for window change: {e}")
+            }
+        }
+    }
+}
+
+/// A signal request: the client sends a signal to the command.
+pub struct ServSignal<'g, 'a> {
+    runner: &'g mut Runner<'a, Server>,
+    num: ChanNum,
+    done: bool,
+}
+
+impl<'g, 'a> ServSignal<'g, 'a> {
+    fn new(runner: &'g mut Runner<'a, Server>, num: ChanNum) -> Self {
+        Self { runner, num, done: false }
+    }
+
+    /// The signal's name without the "SIG" prefix, such as "INT"
+    /// (RFC 4254 6.9). Note: not checked against the names of 6.10.
+    pub fn name(&self) -> Result<&str> {
+        self.runner.fetch_signal()
+    }
+
+    /// Indicate that the request succeeded.
+    ///
+    /// Clients do not ask for a reply to a signal, so this usually does
+    /// nothing.
+    pub fn succeed(mut self) -> Result<()> {
+        self.done = true;
+        self.runner.resume_chanreq(true)
+    }
+
+    /// Indicate that the request failed.
+    ///
+    /// Does not need to be called explicitly, also occurs on drop.
+    pub fn fail(mut self) -> Result<()> {
+        self.done = true;
+        self.runner.resume_chanreq(false)
+    }
+
+    /// Return the associated channel number.
+    pub fn channel(&self) -> ChanNum {
+        self.num
+    }
+}
+
+impl Drop for ServSignal<'_, '_> {
+    fn drop(&mut self) {
+        if !self.done {
+            if let Err(e) = self.runner.resume_chanreq(false) {
+                trace!("Error for signal: {e}")
+            }
+        }
+    }
+}
+
 // Only small values should be stored inline.
 // Larger state is retrieved from the current packet via Runner::fetch_*()
 #[derive(Debug, Clone)]
@@ -943,6 +1061,12 @@ pub(crate) enum ServEventId {
         num: ChanNum,
     },
     Environment {
+        num: ChanNum,
+    },
+    SessionWindowChange {
+        num: ChanNum,
+    },
+    SessionSignal {
         num: ChanNum,
     },
     #[expect(unused)]
@@ -1006,6 +1130,16 @@ impl ServEventId {
                 debug_assert!(matches!(p, Some(Packet::ChannelRequest(_))));
                 Ok(ServEvent::SessionEnv(ServEnvironmentRequest::new(runner, num)))
             }
+            Self::SessionWindowChange { num } => {
+                debug_assert!(matches!(p, Some(Packet::ChannelRequest(_))));
+                Ok(ServEvent::SessionWindowChange(ServWindowChange::new(
+                    runner, num,
+                )))
+            }
+            Self::SessionSignal { num } => {
+                debug_assert!(matches!(p, Some(Packet::ChannelRequest(_))));
+                Ok(ServEvent::SessionSignal(ServSignal::new(runner, num)))
+            }
             Self::Defunct => Ok(ServEvent::Defunct),
         }
     }
@@ -1024,6 +1158,8 @@ impl ServEventId {
             | Self::SessionExec { .. }
             | Self::SessionSubsystem { .. }
             | Self::Environment { .. }
+            | Self::SessionWindowChange { .. }
+            | Self::SessionSignal { .. }
             | Self::SessionPty { .. } => true,
         }
     }

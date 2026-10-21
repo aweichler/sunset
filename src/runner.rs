@@ -83,6 +83,16 @@ impl<'a> Runner<'a, client::Client> {
         self.conn.channels.term_break(chan.0, length, &mut s)
     }
 
+    /// Send a signal to the remote command of a session channel
+    /// (RFC 4254 6.9).
+    ///
+    /// `signal` is the name without the "SIG" prefix, such as "INT".
+    /// Only call on a client session.
+    pub fn term_signal(&mut self, chan: &ChanHandle, signal: &str) -> Result<()> {
+        let mut s = self.traf_out.sender(&mut self.keys);
+        self.conn.channels.term_signal(chan.0, signal, &mut s)
+    }
+
     pub(crate) fn fetch_cli_session_exit(&mut self) -> Result<CliSessionExit<'_>> {
         let (payload, _seq) = self.traf_in.payload().trap()?;
         self.conn.fetch_cli_session_exit(payload)
@@ -900,6 +910,8 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
                 | DispatchEvent::ServEvent(ServEventId::SessionSubsystem { .. })
                 | DispatchEvent::ServEvent(ServEventId::SessionPty { .. })
                 | DispatchEvent::ServEvent(ServEventId::Environment { .. })
+                | DispatchEvent::ServEvent(ServEventId::SessionWindowChange { .. })
+                | DispatchEvent::ServEvent(ServEventId::SessionSignal { .. })
         ));
     }
 
@@ -927,6 +939,34 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         let (payload, _seq) = self.traf_in.payload().trap()?;
         let p = self.conn.packet(payload)?;
         self.conn.channels.fetch_env_name(&p)
+    }
+
+    pub(crate) fn fetch_pty_term(&self) -> Result<TextString<'_>> {
+        Self::check_chanreq(&self.resume_event);
+        let (payload, _seq) = self.traf_in.payload().trap()?;
+        let p = self.conn.packet(payload)?;
+        self.conn.channels.fetch_pty_term(&p)
+    }
+
+    pub(crate) fn fetch_pty_modes(&self) -> Result<sshwire::BinString<'_>> {
+        Self::check_chanreq(&self.resume_event);
+        let (payload, _seq) = self.traf_in.payload().trap()?;
+        let p = self.conn.packet(payload)?;
+        self.conn.channels.fetch_pty_modes(&p)
+    }
+
+    pub(crate) fn fetch_winsize(&self) -> Result<packets::WinChange> {
+        Self::check_chanreq(&self.resume_event);
+        let (payload, _seq) = self.traf_in.payload().trap()?;
+        let p = self.conn.packet(payload)?;
+        self.conn.channels.fetch_winsize(&p)
+    }
+
+    pub(crate) fn fetch_signal(&self) -> Result<&str> {
+        Self::check_chanreq(&self.resume_event);
+        let (payload, _seq) = self.traf_in.payload().trap()?;
+        let p = self.conn.packet(payload)?;
+        self.conn.channels.fetch_signal(&p)
     }
 
     pub(crate) fn fetch_env_value(&self) -> Result<TextString<'_>> {

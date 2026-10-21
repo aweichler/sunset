@@ -321,6 +321,19 @@ impl Channels {
         }
     }
 
+    pub(crate) fn term_signal(
+        &self,
+        num: ChanNum,
+        signal: &str,
+        s: &mut TrafSend,
+    ) -> Result<()> {
+        let ch = self.get(num)?;
+        match ch.ty {
+            ChanType::Session => Req::Signal(signal).send(ch, s),
+            _ => error::BadChannelData.fail(),
+        }
+    }
+
     fn dispatch_open(
         &mut self,
         p: &ChannelOpen<'_>,
@@ -602,6 +615,56 @@ impl Channels {
         }
     }
 
+    pub fn fetch_pty_term<'p>(&self, p: &Packet<'p>) -> Result<TextString<'p>> {
+        match p {
+            Packet::ChannelRequest(ChannelRequest {
+                req: ChannelReqType::Pty(packets::PtyReq { term, .. }),
+                ..
+            }) => Ok(*term),
+            _ => Error::bug(),
+        }
+    }
+
+    pub fn fetch_pty_modes<'p>(&self, p: &Packet<'p>) -> Result<BinString<'p>> {
+        match p {
+            Packet::ChannelRequest(ChannelRequest {
+                req: ChannelReqType::Pty(packets::PtyReq { modes, .. }),
+                ..
+            }) => Ok(*modes),
+            _ => Error::bug(),
+        }
+    }
+
+    /// The terminal's size from a pty-req or a window-change.
+    pub fn fetch_winsize(&self, p: &Packet<'_>) -> Result<packets::WinChange> {
+        match p {
+            Packet::ChannelRequest(ChannelRequest {
+                req: ChannelReqType::Pty(pty),
+                ..
+            }) => Ok(packets::WinChange {
+                cols: pty.cols,
+                rows: pty.rows,
+                width: pty.width,
+                height: pty.height,
+            }),
+            Packet::ChannelRequest(ChannelRequest {
+                req: ChannelReqType::WinChange(winch),
+                ..
+            }) => Ok(winch.clone()),
+            _ => Error::bug(),
+        }
+    }
+
+    pub fn fetch_signal<'p>(&self, p: &Packet<'p>) -> Result<&'p str> {
+        match p {
+            Packet::ChannelRequest(ChannelRequest {
+                req: ChannelReqType::Signal(packets::Signal { sig }),
+                ..
+            }) => Ok(*sig),
+            _ => Error::bug(),
+        }
+    }
+
     pub fn fetch_env_value<'p>(&self, p: &Packet<'p>) -> Result<TextString<'p>> {
         match p {
             Packet::ChannelRequest(ChannelRequest {
@@ -675,7 +738,7 @@ pub enum Req<'a> {
     Pty(Pty),
     WinChange(packets::WinChange),
     Break(packets::Break),
-    // Signal,
+    Signal(&'a str),
     ExitStatus(packets::ExitStatus),
     ExitSignal(packets::ExitSignal<'a>),
 }
@@ -705,6 +768,7 @@ impl Req<'_> {
             }),
             Req::WinChange(rt) => ChannelReqType::WinChange(rt),
             Req::Break(rt) => ChannelReqType::Break(rt),
+            Req::Signal(sig) => ChannelReqType::Signal(packets::Signal { sig }),
             Req::ExitStatus(rt) => ChannelReqType::ExitStatus(rt),
             Req::ExitSignal(rt) => ChannelReqType::ExitSignal(rt),
         };
@@ -965,6 +1029,14 @@ impl Channel {
             }
             ChannelReqType::Environment(_) => {
                 Ok(DispatchEvent::ServEvent(ServEventId::Environment { num }))
+            }
+            ChannelReqType::WinChange(_) => {
+                Ok(DispatchEvent::ServEvent(ServEventId::SessionWindowChange {
+                    num,
+                }))
+            }
+            ChannelReqType::Signal(_) => {
+                Ok(DispatchEvent::ServEvent(ServEventId::SessionSignal { num }))
             }
             _ => {
                 if let ChannelReqType::Unknown(u) = &p.req {
