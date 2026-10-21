@@ -294,6 +294,16 @@ impl Channels {
         }
     }
 
+    /// Ends the application's sending on a channel (RFC 4254 5.3).
+    pub(crate) fn eof(&mut self, num: ChanNum, s: &mut TrafSend) -> Result<()> {
+        self.get_mut(num)?.send_eof(s)
+    }
+
+    /// Closes a channel from the application's side (RFC 4254 5.3).
+    pub(crate) fn close(&mut self, num: ChanNum, s: &mut TrafSend) -> Result<()> {
+        self.get_mut(num)?.send_close(s)
+    }
+
     /// Reports how a session's command ended (RFC 4254 6.10).
     pub(crate) fn exit(
         &self,
@@ -1003,12 +1013,9 @@ impl Channel {
         }
     }
 
-    fn handle_eof(&mut self, s: &mut TrafSend, is_client: bool) -> Result<()> {
-        //TODO: check existing state?
-        if !self.sent_eof {
-            s.send(packets::ChannelEof { num: self.send_num()? })?;
-            self.sent_eof = true;
-        }
+    fn handle_eof(&mut self, _s: &mut TrafSend, is_client: bool) -> Result<()> {
+        // The peer's EOF ends only its direction; this side keeps sending
+        // until the application calls `Runner::channel_eof()`.
 
         // Wake readers on EOF
         self.wake_read(ChanData::Normal, is_client);
@@ -1023,10 +1030,7 @@ impl Channel {
 
     fn handle_close(&mut self, s: &mut TrafSend, is_client: bool) -> Result<()> {
         //TODO: check existing state?
-        if !self.sent_close {
-            s.send(packets::ChannelClose { num: self.send_num()? })?;
-            self.sent_close = true;
-        }
+        self.send_close(s)?;
 
         // Wake readers and writers on EOF
         self.wake_read(ChanData::Normal, is_client);
@@ -1036,6 +1040,22 @@ impl Channel {
         self.wake_write(is_client);
 
         self.state = ChanState::RecvClose;
+        Ok(())
+    }
+
+    fn send_eof(&mut self, s: &mut TrafSend) -> Result<()> {
+        if !self.sent_eof && !self.sent_close {
+            s.send(packets::ChannelEof { num: self.send_num()? })?;
+            self.sent_eof = true;
+        }
+        Ok(())
+    }
+
+    fn send_close(&mut self, s: &mut TrafSend) -> Result<()> {
+        if !self.sent_close {
+            s.send(packets::ChannelClose { num: self.send_num()? })?;
+            self.sent_close = true;
+        }
         Ok(())
     }
 
@@ -1051,8 +1071,11 @@ impl Channel {
         matches!(self.state, ChanState::RecvClose)
     }
 
-    // None on close
+    // None on close, and once this side has sent EOF
     fn send_allowed(&self) -> Option<usize> {
+        if self.sent_eof || self.sent_close {
+            return None;
+        }
         let r = self.send.as_ref().map(|s| usize::min(s.window, s.max_packet));
         trace!("send_allowed {r:?}");
         r

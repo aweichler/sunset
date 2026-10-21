@@ -744,6 +744,30 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         }
     }
 
+    /// End sending on a channel: send EOF (RFC 4254 5.3).
+    ///
+    /// The peer's EOF does not end this direction; call this when the
+    /// application has no more data for the channel. Later writes fail
+    /// with `Error::ChannelEOF`. Calling it again does nothing.
+    pub fn channel_eof(&mut self, chan: &ChanHandle) -> Result<()> {
+        let mut s = self.traf_out.sender(&mut self.keys);
+        self.conn.channels.eof(chan.0, &mut s)?;
+        self.wake();
+        Ok(())
+    }
+
+    /// Close a channel from this side (RFC 4254 5.3).
+    ///
+    /// A server sends the exit status first. The channel remains until the
+    /// peer's close has arrived and `channel_done()` has been called.
+    /// Calling it again does nothing.
+    pub fn channel_close(&mut self, chan: &ChanHandle) -> Result<()> {
+        let mut s = self.traf_out.sender(&mut self.keys);
+        self.conn.channels.close(chan.0, &mut s)?;
+        self.wake();
+        Ok(())
+    }
+
     /// Report the exit status of a session's command (RFC 4254 6.10).
     ///
     /// Only call on a server session, before the channel is closed.
